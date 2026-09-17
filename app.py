@@ -18,6 +18,7 @@ PURPOSE_OPTIONS = [
     "Child / Family Review",
     "Office / Administrative Travel",
     "Training / CPD",
+    "Group work commute",
     "Other"
 ]
 
