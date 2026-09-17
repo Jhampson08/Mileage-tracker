@@ -1,3 +1,0 @@
-mileage_log.csv
-__pycache__/
-.streamlit/
