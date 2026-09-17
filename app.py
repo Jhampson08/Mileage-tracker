@@ -17,6 +17,7 @@ PURPOSE_OPTIONS = [
     "Multi-Agency Meeting",
     "Child / Family Review",
     "Office / Administrative Travel",
+    "Training / CPD",
     "Other"
 ]
 
