@@ -1,0 +1,15 @@
+credentials:
+  usernames:
+    admin:
+      name: Admin User
+      password: REPLACE_WITH_HASHED_PASSWORD
+      role: admin
+    jbloggs:
+      name: Jane Bloggs
+      password: REPLACE_WITH_HASHED_PASSWORD
+      role: staff
+
+cookie:
+  name: mileage_auth_cookie
+  key: CHANGE_THIS_TO_A_RANDOM_SECRET_STRING
+  expiry_days: 30

@@ -1,4 +1,7 @@
 import streamlit as st
+import streamlit_authenticator as stauth
+import yaml
+from yaml.loader import SafeLoader
 import requests
 import pandas as pd
 import os
@@ -8,6 +11,7 @@ from datetime import date
 # Configuration & Constants
 # ---------------------------------------------------------
 CSV_FILE = "mileage_log.csv"
+CONFIG_FILE = "config.yaml"
 MILEAGE_RATE = 0.45
 
 PURPOSE_OPTIONS = [
@@ -22,11 +26,42 @@ PURPOSE_OPTIONS = [
     "Other"
 ]
 
-# Initialize Session State memory
-if "saved_staff" not in st.session_state:
-    st.session_state.saved_staff = ""
-if "saved_start_pc" not in st.session_state:
-    st.session_state.saved_start_pc = ""
+# ---------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------
+with open(CONFIG_FILE) as f:
+    config = yaml.load(f, Loader=SafeLoader)
+
+authenticator = stauth.Authenticate(
+    config["credentials"],
+    config["cookie"]["name"],
+    config["cookie"]["key"],
+    config["cookie"]["expiry_days"],
+)
+
+st.set_page_config(page_title="Outreach Mileage Tracker", page_icon="🚗", layout="centered")
+
+authenticator.login(location="main")
+
+auth_status = st.session_state.get("authentication_status")
+
+if auth_status is False:
+    st.error("Username or password is incorrect.")
+    st.stop()
+elif auth_status is None:
+    st.warning("Please log in to continue.")
+    st.stop()
+
+# At this point the user is authenticated
+username = st.session_state["username"]
+display_name = st.session_state["name"]
+user_role = config["credentials"]["usernames"].get(username, {}).get("role", "staff")
+is_admin = user_role == "admin"
+
+with st.sidebar:
+    st.write(f"Logged in as **{display_name}**")
+    st.caption(f"Role: {user_role}")
+    authenticator.logout("Log out", location="sidebar")
 
 # ---------------------------------------------------------
 # Helper Functions
@@ -59,33 +94,24 @@ def get_driving_miles(start_coords, end_coords):
 # ---------------------------------------------------------
 # Page Setup & Input Form
 # ---------------------------------------------------------
-st.set_page_config(page_title="Outreach Mileage Tracker", page_icon="🚗", layout="centered")
 st.title("🚗 Outreach Mileage Tracker")
 
 with st.form("mileage_form"):
     col1, col2 = st.columns(2)
     with col1:
         trip_date = st.date_input("Date of Journey", value=date.today())
-        start_pc = st.text_input(
-            "Start Postcode", 
-            value=st.session_state.saved_start_pc, 
-            placeholder="e.g. PR25 2DY"
-        )
+        start_pc = st.text_input("Start Postcode", placeholder="e.g. PR25 2DY")
     with col2:
-        staff_name = st.text_input(
-            "Staff ID / Name", 
-            value=st.session_state.saved_staff, 
-            placeholder="e.g. W-104"
-        )
+        st.text_input("Staff", value=display_name, disabled=True)
         end_pc = st.text_input("Destination Postcode", placeholder="e.g. PR1 8XJ")
-    
+
     col3, col4 = st.columns([2, 1])
     with col3:
         purpose_choice = st.selectbox("Trip Purpose", options=PURPOSE_OPTIONS)
     with col4:
-        st.write("") 
+        st.write("")
         is_return = st.checkbox("Return Journey (x2)", value=False)
-        
+
     custom_notes = st.text_input("Optional Case Ref / Notes", placeholder="e.g. Review meeting")
     submitted = st.form_submit_button("Calculate & Log Trip")
 
@@ -93,12 +119,11 @@ with st.form("mileage_form"):
 # Submission Logic
 # ---------------------------------------------------------
 if submitted:
-    clean_staff = staff_name.strip() .title()
     clean_start = start_pc.strip().upper()
     clean_end = end_pc.strip().upper()
 
-    if not clean_staff or not clean_start or not clean_end:
-        st.error("Please provide your Staff ID and both valid postcodes.")
+    if not clean_start or not clean_end:
+        st.error("Please provide both valid postcodes.")
     else:
         with st.spinner("Calculating driving route..."):
             start_ll = get_coords(clean_start)
@@ -113,7 +138,7 @@ if submitted:
                 else:
                     total_miles = round(base_miles * 2, 2) if is_return else base_miles
                     claim_amount = round(total_miles * MILEAGE_RATE, 2)
-                    
+
                     full_purpose = f"{purpose_choice} - {custom_notes}".strip(" -")
                     journey_type = "Return" if is_return else "One-way"
 
@@ -121,7 +146,8 @@ if submitted:
 
                     new_entry = pd.DataFrame([{
                         "Date": str(trip_date),
-                        "Staff": clean_staff,
+                        "Username": username,
+                        "Staff": display_name,
                         "Start Postcode": clean_start,
                         "Destination Postcode": clean_end,
                         "Miles": total_miles,
@@ -146,21 +172,25 @@ if submitted:
                     st.session_state.show_undo = True
 
 # ---------------------------------------------------------
-# Undo Last Submission (Self-Service Fix)
+# Undo Last Submission — scoped to the logged-in user
 # ---------------------------------------------------------
 if st.session_state.get("show_undo", False):
     col_undo, _ = st.columns([2, 3])
     with col_undo:
-        if st.button("↩️ Made a mistake? Undo last logged trip"):
+        if st.button("↩️ Made a mistake? Undo my last logged trip"):
             if os.path.isfile(CSV_FILE):
                 df_current = pd.read_csv(CSV_FILE)
-                if not df_current.empty:
-                    df_current = df_current.iloc[:-1]
+                user_rows = df_current[df_current["Username"] == username]
+                if not user_rows.empty:
+                    last_idx = user_rows.index[-1]
+                    df_current = df_current.drop(index=last_idx).reset_index(drop=True)
                     df_current.to_csv(CSV_FILE, index=False)
-                    
+
                     st.session_state.show_undo = False
-                    st.warning("Last entry removed. You can now re-enter your trip.")
+                    st.warning("Your last entry was removed. You can now re-enter your trip.")
                     st.rerun()
+                else:
+                    st.info("No trips found to undo for your account.")
 
 # ---------------------------------------------------------
 # Log Viewer, Reconciliation & Downloads
@@ -169,6 +199,10 @@ st.markdown("---")
 
 if os.path.isfile(CSV_FILE):
     df = pd.read_csv(CSV_FILE)
+
+    # Backfill Username for any legacy rows so old data doesn't vanish for admins
+    if "Username" not in df.columns:
+        df["Username"] = ""
 
     # 1. Clean and force numeric types (fixes round/str errors)
     if "Miles" in df.columns:
@@ -191,6 +225,10 @@ if os.path.isfile(CSV_FILE):
     if "Type" not in df.columns:
         df["Type"] = "One-way"
         df.to_csv(CSV_FILE, index=False)
+
+    # ---- Access control: staff only ever see their own rows ----
+    if not is_admin:
+        df = df[df["Username"] == username]
 
     tab1, tab2 = st.tabs(["Oracle Fusion Monthly Summary", "All Logged Trips"])
 
@@ -236,19 +274,26 @@ if os.path.isfile(CSV_FILE):
     # TAB 1: Monthly Fusion Reconciliation
     with tab1:
         st.subheader("Monthly Claim Summary")
-        st.caption("Filter your trips to produce the exact figure for Oracle Fusion Expenses.")
+        if is_admin:
+            st.caption("Filter trips across all staff to produce the exact figure for Oracle Fusion Expenses.")
+        else:
+            st.caption("Your trips, ready for Oracle Fusion Expenses.")
 
-        staff_list = sorted(df["Staff"].dropna().unique().tolist())
         month_list = sorted(df["Month"].dropna().unique().tolist(), reverse=True)
 
-        c1, c2 = st.columns(2)
-        with c1:
-            sel_staff = st.selectbox("Select Staff ID", options=["All"] + staff_list)
-        with c2:
+        if is_admin:
+            staff_list = sorted(df["Staff"].dropna().unique().tolist())
+            c1, c2 = st.columns(2)
+            with c1:
+                sel_staff = st.selectbox("Select Staff", options=["All"] + staff_list)
+            with c2:
+                sel_month = st.selectbox("Select Month", options=["All"] + month_list)
+        else:
+            sel_staff = display_name
             sel_month = st.selectbox("Select Month", options=["All"] + month_list)
 
         filtered_df = df.copy()
-        if sel_staff != "All":
+        if is_admin and sel_staff != "All":
             filtered_df = filtered_df[filtered_df["Staff"] == sel_staff]
         if sel_month != "All":
             filtered_df = filtered_df[filtered_df["Month"] == sel_month]
@@ -262,7 +307,7 @@ if os.path.isfile(CSV_FILE):
         m2.metric("Total Miles", f"{f_miles} mi")
         m3.metric("Fusion Claim Total", f"£{f_claim:.2f}")
 
-        # Summary Table
+        # Summary Table (only meaningful with >1 staff row, i.e. admin view)
         summary_df = filtered_df.groupby("Staff", as_index=False).agg(
             Trips=("Miles", "count"),
             Total_Miles=("Miles", "sum"),
@@ -275,7 +320,7 @@ if os.path.isfile(CSV_FILE):
             "Total_Reimbursement_GBP": "Total Reimbursement (£)"
         })
 
-        st.markdown(summary_df.to_html(classes="custom-table", index=False, escape=False), unsafe_allow_html=True)
+        st.markdown(summary_df.to_html(classes="custom-table", index=False, escape=True), unsafe_allow_html=True)
 
         st.download_button(
             label="📄 Download Fusion Evidence Schedule (CSV)",
@@ -286,15 +331,15 @@ if os.path.isfile(CSV_FILE):
 
     # TAB 2: Itemised Log
     with tab2:
-        st.subheader("All Logged Records")
+        st.subheader("All Logged Records" if is_admin else "My Logged Trips")
         display_raw = df.copy()
         display_raw["Claim Amount (£)"] = display_raw["Claim Amount (£)"].apply(lambda x: f"£{x:.2f}")
-        st.markdown(display_raw.to_html(classes="custom-table", index=False, escape=False), unsafe_allow_html=True)
+        st.markdown(display_raw.to_html(classes="custom-table", index=False, escape=True), unsafe_allow_html=True)
 
         st.download_button(
-            label="Download Complete Audit Log (CSV)",
+            label="Download Audit Log (CSV)",
             data=df.to_csv(index=False).encode("utf-8"),
-            file_name="complete_mileage_audit_log.csv",
+            file_name="mileage_audit_log.csv",
             mime="text/csv"
         )
 else:
