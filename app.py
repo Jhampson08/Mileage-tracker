@@ -5,6 +5,7 @@ from yaml.loader import SafeLoader
 import requests
 import pandas as pd
 import os
+import bcrypt
 from datetime import date
 
 # ---------------------------------------------------------
@@ -27,7 +28,7 @@ PURPOSE_OPTIONS = [
 ]
 
 # ---------------------------------------------------------
-# Authentication
+# Authentication Setup
 # ---------------------------------------------------------
 with open(CONFIG_FILE) as f:
     config = yaml.load(f, Loader=SafeLoader)
@@ -52,16 +53,60 @@ elif auth_status is None:
     st.warning("Please log in to continue.")
     st.stop()
 
-# At this point the user is authenticated
+# Authenticated Session Variables
 username = st.session_state["username"]
 display_name = st.session_state["name"]
 user_role = config["credentials"]["usernames"].get(username, {}).get("role", "staff")
 is_admin = user_role == "admin"
 
+# ---------------------------------------------------------
+# Sidebar: User Profile, Password Reset & Admin Panel
+# ---------------------------------------------------------
 with st.sidebar:
     st.write(f"Logged in as **{display_name}**")
     st.caption(f"Role: {user_role}")
     authenticator.logout("Log out", location="sidebar")
+
+    st.markdown("---")
+
+    # 1. Password Reset (Available to all logged-in staff)
+    with st.expander("🔒 Change My Password"):
+        try:
+            if authenticator.reset_password(username):
+                with open(CONFIG_FILE, "w") as f:
+                    yaml.dump(config, f, default_flow_style=False)
+                st.success("Password updated successfully!")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    # 2. Admin User Management (Add new staff accounts directly from UI)
+    if is_admin:
+        with st.expander("👥 Admin: Add Staff User"):
+            with st.form("admin_create_user_form", clear_on_submit=True):
+                new_user = st.text_input("Username (e.g. jsmith)").strip().lower()
+                new_name = st.text_input("Full Name (e.g. Jane Smith)").strip()
+                new_mail = st.text_input("Work Email").strip()
+                new_role = st.selectbox("Role", options=["staff", "admin"])
+                temp_pw = st.text_input("Temporary Password", type="password")
+                add_clicked = st.form_submit_button("Create Account")
+
+                if add_clicked:
+                    if not new_user or not new_name or not temp_pw:
+                        st.error("Please fill in username, name, and temporary password.")
+                    elif new_user in config["credentials"]["usernames"]:
+                        st.error(f"User '{new_user}' already exists.")
+                    else:
+                        # Direct bcrypt hash generation
+                        hashed = bcrypt.hashpw(temp_pw.encode(), bcrypt.gensalt()).decode()
+                        config["credentials"]["usernames"][new_user] = {
+                            "name": new_name,
+                            "email": new_mail,
+                            "password": hashed,
+                            "role": new_role
+                        }
+                        with open(CONFIG_FILE, "w") as f:
+                            yaml.dump(config, f, default_flow_style=False)
+                        st.success(f"Account for **{new_name}** (`{new_user}`) created!")
 
 # ---------------------------------------------------------
 # Helper Functions
@@ -204,7 +249,7 @@ if os.path.isfile(CSV_FILE):
     if "Username" not in df.columns:
         df["Username"] = ""
 
-    # 1. Clean and force numeric types (fixes round/str errors)
+    # 1. Clean and force numeric types
     if "Miles" in df.columns:
         df["Miles"] = pd.to_numeric(df["Miles"], errors="coerce").fillna(0.0)
 
@@ -226,7 +271,7 @@ if os.path.isfile(CSV_FILE):
         df["Type"] = "One-way"
         df.to_csv(CSV_FILE, index=False)
 
-    # ---- Access control: staff only ever see their own rows ----
+    # Access control: staff only ever see their own rows
     if not is_admin:
         df = df[df["Username"] == username]
 
@@ -307,7 +352,7 @@ if os.path.isfile(CSV_FILE):
         m2.metric("Total Miles", f"{f_miles} mi")
         m3.metric("Fusion Claim Total", f"£{f_claim:.2f}")
 
-        # Summary Table (only meaningful with >1 staff row, i.e. admin view)
+        # Aggregated table
         summary_df = filtered_df.groupby("Staff", as_index=False).agg(
             Trips=("Miles", "count"),
             Total_Miles=("Miles", "sum"),
