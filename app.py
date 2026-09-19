@@ -191,7 +191,7 @@ if submitted:
 
                     new_entry = pd.DataFrame([{
                         "Date": str(trip_date),
-                        "Username": username,
+                        "Username": str(username).strip().lower(),
                         "Staff": display_name,
                         "Start Postcode": clean_start,
                         "Destination Postcode": clean_end,
@@ -225,7 +225,8 @@ if st.session_state.get("show_undo", False):
         if st.button("↩️ Made a mistake? Undo my last logged trip"):
             if os.path.isfile(CSV_FILE):
                 df_current = pd.read_csv(CSV_FILE)
-                user_rows = df_current[df_current["Username"] == username]
+                clean_user = str(username).strip().lower()
+                user_rows = df_current[df_current["Username"].astype(str).str.strip().str.lower() == clean_user]
                 if not user_rows.empty:
                     last_idx = user_rows.index[-1]
                     df_current = df_current.drop(index=last_idx).reset_index(drop=True)
@@ -271,9 +272,10 @@ if os.path.isfile(CSV_FILE):
         df["Type"] = "One-way"
         df.to_csv(CSV_FILE, index=False)
 
-    # Access control: staff only ever see their own rows
+    # Access control: staff only ever see their own rows (case-insensitive & clean)
     if not is_admin:
-        df = df[df["Username"] == username]
+        clean_user = str(username).strip().lower()
+        df = df[df["Username"].astype(str).str.strip().str.lower() == clean_user]
 
     tab1, tab2 = st.tabs(["Oracle Fusion Monthly Summary", "All Logged Trips"])
 
